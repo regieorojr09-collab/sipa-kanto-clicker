@@ -57,6 +57,11 @@ GROUND_Y: Final[float] = 610.0  # Pixel coordinate of street pavement line
 BASE_KICK_VELOCITY: Final[float] = 860.0  # Initial launch speed in px/s
 SIPA_RADIUS: Final[float] = 14.0  # Sipa visual collision radius
 
+# Screen Boundaries
+BOUND_MIN_X: Final[float] = 40.0
+BOUND_MAX_X: Final[float] = 1240.0
+KICK_TARGET_Y: Final[float] = 520.0  # Height where targets spawn for kicking
+
 # -----------------------------------------------------------------------------
 # Precision Rhythm & Hit Judgments (Osu!-style Timing Windows in milliseconds)
 # -----------------------------------------------------------------------------
@@ -64,7 +69,14 @@ TIMING_SWAK_MS: Final[float] = 25.0    # Perfect (±25 ms) -> 300 pts
 TIMING_PUWEDE_MS: Final[float] = 70.0  # Good    (±70 ms) -> 100 pts
 TIMING_DAPLIS_MS: Final[float] = 120.0 # OK      (±120 ms) -> 50 pts
 
+# Judgment Base Scores
+POINTS_SWAK: Final[int] = 300
+POINTS_PUWEDE: Final[int] = 100
+POINTS_DAPLIS: Final[int] = 50
+POINTS_BAGSAK: Final[int] = 0
+
 # Visual Target Defaults
-HIT_CIRCLE_RADIUS: Final[float] = 36.0     # Clickable core circle
-APPROACH_RING_MAX_R: Final[float] = 130.0  # Starting radius of approach ring
+HIT_CIRCLE_RADIUS: Final[float] = 32.0     # Clickable core circle (r_hit = 32px)
+APPROACH_RING_MAX_R: Final[float] = 128.0  # Starting radius of approach ring (r_max = 128px)
 DEFAULT_APPROACH_RATE: Final[float] = 6.0  # Approach Rate (AR)
+
