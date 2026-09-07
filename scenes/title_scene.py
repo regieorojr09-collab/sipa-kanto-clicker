@@ -61,7 +61,7 @@ class TitleScene(Scene):
             self.diff_buttons[d] = pygame.Rect(x, diff_y, tab_w, tab_h)
 
         # Interactive Start Button geometry
-        button_w, button_h = 420, 68
+        button_w, button_h = 480, 68
         self.button_rect: pygame.Rect = pygame.Rect(
             LOGICAL_CENTER_X - (button_w // 2),
             465,
@@ -80,7 +80,7 @@ class TitleScene(Scene):
         if self.font_title is None:
             self.font_title = pygame.font.Font(None, 78)
             self.font_subtitle = pygame.font.Font(None, 34)
-            self.font_button = pygame.font.Font(None, 36)
+            self.font_button = pygame.font.Font(None, 34)
             self.font_diff = pygame.font.Font(None, 24)
             self.font_info = pygame.font.Font(None, 24)
 
@@ -101,6 +101,10 @@ class TitleScene(Scene):
 
         # Handle mouse clicks
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if not self.audio_unlocked:
+                self.audio_unlocked = True
+                event_bus.publish(GameEvent.AUDIO_UNLOCK)
+
             if self.hovered_diff is not None:
                 self.selected_difficulty = self.hovered_diff
             elif self.is_button_hovered:
@@ -108,6 +112,10 @@ class TitleScene(Scene):
 
         # Keyboard shortcuts
         elif event.type == pygame.KEYDOWN:
+            if not self.audio_unlocked:
+                self.audio_unlocked = True
+                event_bus.publish(GameEvent.AUDIO_UNLOCK)
+
             if event.key in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_z, pygame.K_x):
                 self._proceed_to_game()
             elif event.key == pygame.K_1:
@@ -207,13 +215,21 @@ class TitleScene(Scene):
         pygame.draw.rect(surface, btn_bg, self.button_rect, border_radius=12)
         pygame.draw.rect(surface, btn_border, self.button_rect, width=3, border_radius=12)
 
-        btn_label = f"SIMULAN ({self.selected_difficulty.display_name.upper()})"
+        if not self.audio_unlocked:
+            btn_label = "▶ CLICK TO PLAY / UNLOCK AUDIO"
+        else:
+            btn_label = f"▶ SIMULAN ({self.selected_difficulty.display_name.upper()})"
         surf_btn_txt = self.font_button.render(btn_label, True, (15, 18, 24))
         surface.blit(surf_btn_txt, surf_btn_txt.get_rect(center=self.button_rect.center))
 
-        # 5. Animated prompt
-        pulse_alpha = int(140 + 115 * math.sin(self.time_elapsed * 5.0))
-        surf_prompt = self.font_info.render("Browser Audio Unlocks on First Click • Left Click or Z/X", True, COLOR_TEXT_PRIMARY)
+        # 5. Unambiguous Animated Audio & Interaction Prompt
+        pulse_alpha = int(170 + 85 * math.sin(self.time_elapsed * 5.0))
+        if not self.audio_unlocked:
+            prompt_str = "🔊 CLICK TO PLAY / UNLOCK AUDIO • Left Click or Press Z/X to Start"
+            surf_prompt = self.font_info.render(prompt_str, True, COLOR_SUNSHINE)
+        else:
+            prompt_str = f"Difficulty: {self.selected_difficulty.display_name.upper()} • Left Click or Press SPACE / ENTER / Z / X"
+            surf_prompt = self.font_info.render(prompt_str, True, COLOR_TEXT_PRIMARY)
         surf_prompt.set_alpha(pulse_alpha)
         surface.blit(surf_prompt, surf_prompt.get_rect(center=(LOGICAL_CENTER_X, 555)))
 
