@@ -149,10 +149,24 @@ class Taya:
         event_bus.subscribe(GameEvent.SIPA_LANDED, self._on_sipa_landed)
         event_bus.subscribe(GameEvent.COMBO_MILESTONE, self._on_combo_milestone)
         event_bus.subscribe(GameEvent.ROUND_START, self._on_round_start)
+        event_bus.subscribe(GameEvent.PIKON_THRESHOLD, self._on_pikon_threshold)
 
     def _init_fonts(self) -> None:
         if self.font_callout is None:
             self.font_callout = pygame.font.Font(None, 24)
+
+    def _on_pikon_threshold(self, level: int = 30, modifier: str = "", **kwargs) -> None:
+        """Reacts dynamically when player pushes Pikon meter across difficulty thresholds."""
+        if level >= 95:
+            self.set_state(TayaState.PIKON_RAGE, duration=2.2, callout="Wala kang ligtas!", color=COLOR_BRICK_RED)
+        elif level >= 80:
+            self.set_state(TayaState.PIKON_RAGE, duration=2.0, callout="Pikon na 'ko ah!", color=COLOR_BRICK_RED)
+        elif level == 65:
+            self.set_state(TayaState.TAUNTING, duration=1.6, callout="Kayanin mo dalawa!", color=COLOR_SUNSHINE)
+        elif level == 50:
+            self.set_state(TayaState.TAUNTING, duration=1.6, callout="Bibilisan natin!", color=COLOR_SUNSHINE)
+        elif level == 30:
+            self.set_state(TayaState.CALLING, duration=1.6, callout="Mahangin ba?!", color=COLOR_RETRO_CYAN)
 
     def set_state(self, new_state: TayaState, duration: float = 1.4, callout: Optional[str] = None, color: Tuple[int, int, int] = COLOR_TEXT_PRIMARY) -> None:
         """Transitions Taya into a temporary reaction state with an optional speech bubble."""
@@ -272,3 +286,4 @@ class Taya:
         event_bus.unsubscribe(GameEvent.SIPA_LANDED, self._on_sipa_landed)
         event_bus.unsubscribe(GameEvent.COMBO_MILESTONE, self._on_combo_milestone)
         event_bus.unsubscribe(GameEvent.ROUND_START, self._on_round_start)
+        event_bus.unsubscribe(GameEvent.PIKON_THRESHOLD, self._on_pikon_threshold)

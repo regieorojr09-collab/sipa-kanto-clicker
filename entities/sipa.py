@@ -33,6 +33,7 @@ class Sipa:
         self.vel: Vector2 = Vector2(0.0, 0.0)
         self.spin: float = 0.0  # Rotations per second
         self.angle: float = 0.0  # Current rotation angle in degrees
+        self.wind_force: float = 0.0  # Lateral acceleration from Hangin modifier (px/s^2)
         self.is_airborne: bool = False
         self.is_grounded: bool = True
 
@@ -47,10 +48,11 @@ class Sipa:
             COLOR_TASSEL_GREEN,
         ]
 
-    def launch(self, velocity: Vector2, spin: float = 2.0) -> None:
-        """Launches or kicks the sipa with the specified initial velocity vector."""
+    def launch(self, velocity: Vector2, spin: float = 2.0, wind_force: float = 0.0) -> None:
+        """Launches or kicks the sipa with velocity, spin, and active lateral wind force."""
         self.vel = Vector2(velocity.x, velocity.y)
         self.spin = spin
+        self.wind_force = wind_force
         self.is_airborne = True
         self.is_grounded = False
         self.trail_points.clear()
@@ -61,6 +63,7 @@ class Sipa:
         self.vel = Vector2(0.0, 0.0)
         self.spin = 0.0
         self.angle = 0.0
+        self.wind_force = 0.0
         self.is_airborne = False
         self.is_grounded = True
         self.trail_points.clear()
@@ -68,11 +71,7 @@ class Sipa:
     def predict_landing(self, target_y: float) -> Tuple[float, float, float]:
         """
         Solves the quadratic equation to determine (predicted_x, target_y, arrival_time_ms)
-        when the falling sipa will cross the specified kicking height target_y.
-        
-        Analytical formula:
-            y(t) = y_0 + v_{y0} * t + 0.5 * g * t^2 = target_y
-            0.5 * g * t^2 + v_{y0} * t + (y_0 - target_y) = 0
+        accounting for gravity, lateral wind acceleration, and boundary bounces.
         """
         a = 0.5 * GRAVITY
         b = self.vel.y
@@ -81,54 +80,53 @@ class Sipa:
         discriminant = (b * b) - (4.0 * a * c)
 
         if discriminant < 0.0 or a <= 0.0:
-            # Trajectory apex does not reach or cannot calculate target_y
             return (self.pos.x, target_y, 0.0)
 
-        # The positive root corresponds to the descending phase (falling downward)
         t_arrive_sec = (-b + math.sqrt(discriminant)) / (2.0 * a)
 
         if t_arrive_sec <= 0.0:
             return (self.pos.x, target_y, 0.0)
 
-        # Calculate predicted X taking into account wall bounces within [BOUND_MIN_X, BOUND_MAX_X]
+        # Simulate horizontal path accounting for constant lateral wind acceleration and wall bounces
         curr_x = self.pos.x
         curr_vx = self.vel.x
-        remaining_t = t_arrive_sec
+        sim_dt = 0.005
+        steps = int(t_arrive_sec / sim_dt)
+        rem_t = t_arrive_sec - (steps * sim_dt)
 
-        while remaining_t > 0.0:
-            if curr_vx > 0.0:
-                time_to_wall = (BOUND_MAX_X - curr_x) / curr_vx
-                if time_to_wall < remaining_t:
-                    curr_x = BOUND_MAX_X
-                    curr_vx = -curr_vx * 0.75  # Dampen bounce
-                    remaining_t -= time_to_wall
-                else:
-                    curr_x += curr_vx * remaining_t
-                    break
-            elif curr_vx < 0.0:
-                time_to_wall = (curr_x - BOUND_MIN_X) / (-curr_vx)
-                if time_to_wall < remaining_t:
-                    curr_x = BOUND_MIN_X
-                    curr_vx = -curr_vx * 0.75  # Dampen bounce
-                    remaining_t -= time_to_wall
-                else:
-                    curr_x += curr_vx * remaining_t
-                    break
-            else:
-                break
+        for _ in range(steps):
+            curr_vx += self.wind_force * sim_dt
+            curr_x += curr_vx * sim_dt
+            if curr_x <= BOUND_MIN_X:
+                curr_x = BOUND_MIN_X
+                if curr_vx < 0.0:
+                    curr_vx = -curr_vx * 0.75
+            elif curr_x >= BOUND_MAX_X:
+                curr_x = BOUND_MAX_X
+                if curr_vx > 0.0:
+                    curr_vx = -curr_vx * 0.75
+
+        if rem_t > 0.0:
+            curr_vx += self.wind_force * rem_t
+            curr_x += curr_vx * rem_t
+            if curr_x <= BOUND_MIN_X:
+                curr_x = BOUND_MIN_X
+            elif curr_x >= BOUND_MAX_X:
+                curr_x = BOUND_MAX_X
 
         arrival_time_ms = t_arrive_sec * 1000.0
         return (curr_x, target_y, arrival_time_ms)
 
     def update(self, dt: float) -> None:
-        """Integrates velocity and gravity, performs boundary collisions, and advances trail."""
+        """Integrates velocity, wind, gravity, performs boundary collisions, and advances trail."""
         if not self.is_airborne:
             return
 
         # Record trail position
         self.trail_points.append((Vector2(self.pos.x, self.pos.y), self.angle))
 
-        # Kinematic integration
+        # Kinematic integration with lateral wind acceleration
+        self.vel.x += self.wind_force * dt
         self.vel.y += GRAVITY * dt
         self.pos.x += self.vel.x * dt
         self.pos.y += self.vel.y * dt

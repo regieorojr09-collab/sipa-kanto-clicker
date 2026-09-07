@@ -1,4 +1,4 @@
-"""Core gameplay scene for Sipa: Kanto Clicker integrating physics, rhythm targets, avatar, taya, audio, and VFX."""
+"""Core gameplay scene for Sipa: Kanto Clicker integrating physics, rhythm targets, avatar, taya, difficulty modifiers, and HUD."""
 
 import random
 import pygame
@@ -30,6 +30,7 @@ from entities.avatar import Avatar
 from entities.taya import Taya
 from systems.hit_system import HitSystem
 from systems.scoring import ScoreKeeper
+from systems.difficulty import DifficultyController, DifficultyLevel
 from systems.audio import AudioManager
 from ui.hud import HUD
 from ui.fx import ParticleEmitter, ScreenShake
@@ -72,16 +73,19 @@ class HitRippleVFX:
 class PlayScene(Scene):
     """
     Main arcade/rhythm play scene coordinating:
-    - Sipa kinematic projectile
+    - Sipa kinematic projectile with wind acceleration
     - Avatar animation state machine (Paa, Tuhod, Siko, Stumble)
     - Taya NPC sideline director & taunter
-    - HitSystem approach rings
+    - HitSystem approach rings with difficulty scaling
+    - DifficultyController (Pikon Meter, Hangin, Bilis, Dalawa modifiers)
     - ScoreKeeper & live HUD
     - Procedural audio & VFX (ScreenShake, ParticleEmitter)
+    - Round quota and transition to ResultsScene
     """
 
-    def __init__(self, manager: SceneManager) -> None:
+    def __init__(self, manager: SceneManager, difficulty_level: DifficultyLevel = DifficultyLevel.SAKTO) -> None:
         super().__init__(manager)
+        self.difficulty_level: DifficultyLevel = difficulty_level
         self.mouse_pos: Vector2 = Vector2(LOGICAL_CENTER_X, GROUND_Y)
 
         # Entities
@@ -90,12 +94,13 @@ class PlayScene(Scene):
         self.taya: Taya = Taya(x=130.0, y=GROUND_Y)
 
         # Systems
+        self.difficulty_controller: DifficultyController = DifficultyController(level=self.difficulty_level)
+        self.score_keeper: ScoreKeeper = ScoreKeeper(difficulty_mult=self.difficulty_controller.level.score_mult)
         self.hit_system: HitSystem = HitSystem()
-        self.score_keeper: ScoreKeeper = ScoreKeeper(difficulty_mult=1.0)
         self.audio_manager: AudioManager = AudioManager()
 
         # UI & VFX
-        self.hud: HUD = HUD(self.score_keeper)
+        self.hud: HUD = HUD(self.score_keeper, self.difficulty_controller)
         self.particle_emitter: ParticleEmitter = ParticleEmitter(max_particles=160)
         self.screen_shake: ScreenShake = ScreenShake(max_offset=14.0)
 
@@ -107,23 +112,32 @@ class PlayScene(Scene):
         self.has_spawned_target_for_arc: bool = False
         self.serve_timer: float = 0.5
         self.is_serving: bool = False
+        self.serves_completed: int = 0
+        self.max_serves: int = 15  # 15 serves per round quota
         self.ripples: List[HitRippleVFX] = []
 
-        # Return Button
-        self.back_button_rect: pygame.Rect = pygame.Rect(32, 24, 180, 42)
-        self.is_back_hovered: bool = False
+        # Pause / Menu Button
+        self.pause_button_rect: pygame.Rect = pygame.Rect(32, 24, 180, 42)
+        self.is_pause_hovered: bool = False
 
         # Fonts
         self.font_court: Optional[pygame.font.Font] = None
         self.font_btn: Optional[pygame.font.Font] = None
+        self.font_quota: Optional[pygame.font.Font] = None
 
     def _init_fonts(self) -> None:
         if self.font_court is None:
             self.font_court = pygame.font.Font(None, 24)
             self.font_btn = pygame.font.Font(None, 26)
+            self.font_quota = pygame.font.Font(None, 22)
 
     def on_enter(self, **kwargs) -> None:
         self._init_fonts()
+        if "difficulty_level" in kwargs and kwargs["difficulty_level"]:
+            self.difficulty_level = kwargs["difficulty_level"]
+            self.difficulty_controller.level = self.difficulty_level
+            self.score_keeper.difficulty_mult = self.difficulty_level.score_mult
+
         self.serve_timer = 0.5
         self.is_serving = False
         self.has_spawned_target_for_arc = False
@@ -140,10 +154,32 @@ class PlayScene(Scene):
         self.avatar.destroy()
         self.taya.destroy()
         self.audio_manager.destroy()
+        self.difficulty_controller.destroy()
         self.particle_emitter.clear()
 
+    def _restart_round(self) -> None:
+        """Restarts the active round from zero."""
+        self.score_keeper.reset()
+        self.difficulty_controller.reset()
+        self.hit_system.clear()
+        self.serves_completed = 0
+        self.has_spawned_target_for_arc = False
+        self.serve_sipa()
+
+    def _finish_round(self) -> None:
+        """Transitions to the round results screen."""
+        from scenes.results_scene import ResultsScene
+        stats = self.score_keeper.get_stats()
+        event_bus.publish(
+            GameEvent.ROUND_END,
+            passed=True,
+            final_score=self.score_keeper.score,
+            max_combo=self.score_keeper.max_combo
+        )
+        self.manager.switch(ResultsScene(self.manager, stats=stats, difficulty_level=self.difficulty_level))
+
     def serve_sipa(self) -> None:
-        """Launches a new sipa from court sidelines toward center with Taya callout."""
+        """Launches a new sipa from court sidelines toward center with wind and Taya callout."""
         serve_from_left = random.random() > 0.3
         start_x = 340.0 if serve_from_left else (LOGICAL_W - 340.0)
         target_dir = 1.0 if serve_from_left else -1.0
@@ -152,29 +188,29 @@ class PlayScene(Scene):
 
         vx = target_dir * random.uniform(220.0, 320.0)
         vy = -random.uniform(780.0, 880.0)
-        self.sipa.launch(Vector2(vx, vy), spin=random.uniform(2.0, 3.5))
+        active_wind = self.difficulty_controller.wind_force
+        self.sipa.launch(Vector2(vx, vy), spin=random.uniform(2.0, 3.5), wind_force=active_wind)
 
         self.has_spawned_target_for_arc = False
         self.is_serving = False
+        self.serves_completed += 1
 
-        # Taya shouts callout
+        # Taya shouts serve callout
         self.taya.trigger_serve_call()
 
     def handle_event(self, event: pygame.event.Event, logical_mouse_pos: Vector2) -> None:
         self.mouse_pos = logical_mouse_pos
-        self.is_back_hovered = self.back_button_rect.collidepoint(self.mouse_pos.x, self.mouse_pos.y)
+        self.is_pause_hovered = self.pause_button_rect.collidepoint(self.mouse_pos.x, self.mouse_pos.y)
 
-        # 1. Back Button Click
+        # 1. Pause Button Click
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            if self.is_back_hovered:
-                from scenes.title_scene import TitleScene
-                self.manager.switch(TitleScene(self.manager))
+            if self.is_pause_hovered:
+                self._open_pause_menu()
                 return
 
-        # 2. ESC Key -> Return to Title
+        # 2. ESC Key -> Push Pause Menu
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-            from scenes.title_scene import TitleScene
-            self.manager.switch(TitleScene(self.manager))
+            self._open_pause_menu()
             return
 
         # 3. Hit Input: Mouse Left-Click or Z/X Keys
@@ -186,6 +222,11 @@ class PlayScene(Scene):
 
         if is_hit_trigger:
             self._process_hit_attempt()
+
+    def _open_pause_menu(self) -> None:
+        """Pushes the pause overlay on top of the active scene."""
+        from ui.menus import PauseOverlay
+        self.manager.push(PauseOverlay(self.manager, on_restart_callback=self._restart_round))
 
     def _on_game_hit_result(self, judgment: str, was_miss: bool = False, position: tuple = (640, 360), **kwargs) -> None:
         """Unified responder for hit/miss events: drives SFX, ripples, screen shake, and particles."""
@@ -239,8 +280,9 @@ class PlayScene(Scene):
                 center_bias = 1.0 if self.sipa.pos.x < LOGICAL_CENTER_X else -1.0
                 vx = center_bias * random.uniform(220.0, 340.0) + random.uniform(-25.0, 25.0)
                 vy = -BASE_KICK_VELOCITY * multiplier
+                active_wind = self.difficulty_controller.wind_force
 
-                self.sipa.launch(Vector2(vx, vy), spin=random.uniform(2.5, 4.0))
+                self.sipa.launch(Vector2(vx, vy), spin=random.uniform(2.5, 4.0), wind_force=active_wind)
                 self.has_spawned_target_for_arc = False
         else:
             # Clicked empty space: subtle cursor feedback
@@ -250,10 +292,12 @@ class PlayScene(Scene):
         current_time_ms = float(pygame.time.get_ticks())
         current_time_sec = current_time_ms / 1000.0
 
-        # 1. Update Entities
+        # 1. Update Difficulty Controller (Pikon decay, modifiers)
+        self.difficulty_controller.update(dt)
+
+        # 2. Update Entities
         self.sipa.update(dt)
 
-        # Avatar tracks active target if available, otherwise tracks sipa flight
         if self.hit_system.active_targets:
             self.avatar.track_position(self.hit_system.active_targets[0].cx)
         elif self.sipa.is_airborne:
@@ -262,28 +306,48 @@ class PlayScene(Scene):
         self.avatar.update(dt, current_time_sec)
         self.taya.update(dt)
 
-        # 2. Check trajectory apex to predict landing and spawn approach ring
+        # 3. Check trajectory apex to predict landing and spawn approach ring
         if self.sipa.is_airborne and self.sipa.vel.y >= 0.0 and not self.has_spawned_target_for_arc:
             self.has_spawned_target_for_arc = True
             pred_x, pred_y, arrival_ms = self.sipa.predict_landing(KICK_TARGET_Y)
 
             if arrival_ms > 120.0:
                 t_arrive = current_time_ms + arrival_ms
+                dur = arrival_ms * self.difficulty_controller.approach_rate_mult
+
+                # Apply Chaos offset if unlocked
+                if self.difficulty_controller.chaos_offset:
+                    pred_x = max(100.0, min(1180.0, pred_x + random.uniform(-25.0, 25.0)))
+
                 self.hit_system.spawn_target(
                     cx=pred_x,
                     cy=pred_y,
                     t_arrive=t_arrive,
-                    t_duration=arrival_ms
+                    t_duration=dur
                 )
 
-        # 3. Update Hit System (processes expired/missed targets)
+                # Dalawa modifier: spawn secondary quick target
+                if self.difficulty_controller.double_target:
+                    offset_x = -60.0 if pred_x > LOGICAL_CENTER_X else 60.0
+                    self.hit_system.spawn_target(
+                        cx=max(100.0, min(1180.0, pred_x + offset_x)),
+                        cy=pred_y - 35.0,
+                        t_arrive=t_arrive - 140.0,
+                        t_duration=dur * 0.85
+                    )
+
+        # 4. Update Hit System (processes expired/missed targets)
         expired_events = self.hit_system.update(current_time_ms)
         if expired_events:
             self.audio_manager.play_miss()
             self.screen_shake.add_trauma(0.45)
 
-        # 4. Handle Ground Landing & Serve Resets
+        # 5. Handle Ground Landing & Serve Resets or Round Complete
         if self.sipa.is_grounded and not self.is_serving:
+            if self.serves_completed >= self.max_serves:
+                self._finish_round()
+                return
+
             self.is_serving = True
             self.serve_timer = 0.8
             self.screen_shake.add_trauma(0.25)
@@ -293,7 +357,7 @@ class PlayScene(Scene):
             if self.serve_timer <= 0.0:
                 self.serve_sipa()
 
-        # 5. Update VFX & UI
+        # 6. Update VFX & UI
         self.screen_shake.update(dt)
         self.particle_emitter.update(dt)
 
@@ -305,7 +369,7 @@ class PlayScene(Scene):
 
     def draw(self, surface: pygame.Surface) -> None:
         self._init_fonts()
-        assert self.font_court and self.font_btn
+        assert self.font_court and self.font_btn and self.font_quota
         current_time_ms = float(pygame.time.get_ticks())
 
         # Camera Shake Offset (applied to world geometry only)
@@ -324,12 +388,10 @@ class PlayScene(Scene):
         )
         pygame.draw.rect(surface, COLOR_ASPHALT, asphalt_rect)
 
-        # Street pavement chalk baseline
+        # Street pavement chalk baseline & perspective lines
         pygame.draw.line(surface, COLOR_CHALK, (0, int(GROUND_Y) + oy), (LOGICAL_W, int(GROUND_Y) + oy), 3)
-
-        # Court perspective lines
         pygame.draw.line(surface, COLOR_CHALK, (220 + ox, int(GROUND_Y) + oy), (340 + ox, LOGICAL_H), 2)
-        pygame.draw.line(surface, COLOR_CHALK, (LOGICAL_W - 220 + ox, int(GROUND_Y) + oy), (LOGICAL_W - 340 + ox, LOGICAL_H), 2)
+        pygame.draw.line(surface, COLOR_CHALK, (LOGICAL_W - 220 + ox, int(GROUND_Y) + oy), (LOGICAL_W - 340, LOGICAL_H), 2)
         pygame.draw.line(surface, COLOR_CHALK, (LOGICAL_CENTER_X + ox, int(GROUND_Y) + oy), (LOGICAL_CENTER_X + ox, LOGICAL_H), 2)
 
         # Kicking zone guideline
@@ -340,19 +402,11 @@ class PlayScene(Scene):
         # 3. World Entities (Offset by screen shake)
         world_surf = pygame.Surface((LOGICAL_W, LOGICAL_H), pygame.SRCALPHA)
 
-        # Taya on the sideline
         self.taya.draw(world_surf)
-
-        # Avatar on court
         self.avatar.draw(world_surf)
-
-        # Sipa Projectile
         self.sipa.draw(world_surf)
-
-        # Hit Targets & Approach Rings
         self.hit_system.draw(world_surf, current_time_ms)
 
-        # Hit Ripples & Particles
         for ripple in self.ripples:
             ripple.draw(world_surf)
         self.particle_emitter.draw(world_surf)
@@ -362,15 +416,21 @@ class PlayScene(Scene):
         # 4. Fixed UI Overlay (No Screen Shake for crisp readability)
         self.hud.draw(surface)
 
+        # Round Progress / Quota Tracker
+        serves_left = max(0, self.max_serves - self.serves_completed)
+        quota_str = f"TIRA (SERVES): {self.serves_completed}/{self.max_serves}"
+        surf_quota = self.font_quota.render(quota_str, True, COLOR_TEXT_MUTED)
+        surface.blit(surf_quota, (34, 76))
+
         # 5. Cursor Crosshair at Logical Mouse Position
         mx, my = int(self.mouse_pos.x), int(self.mouse_pos.y)
         pygame.draw.circle(surface, COLOR_TEXT_PRIMARY, (mx, my), 5, width=1)
         pygame.draw.line(surface, COLOR_TEXT_PRIMARY, (mx - 10, my), (mx + 10, my), 1)
         pygame.draw.line(surface, COLOR_TEXT_PRIMARY, (mx, my - 10), (mx, my + 10), 1)
 
-        # 6. Return Button
-        btn_bg = COLOR_BRICK_RED if not self.is_back_hovered else (240, 85, 80)
-        pygame.draw.rect(surface, btn_bg, self.back_button_rect, border_radius=8)
-        pygame.draw.rect(surface, COLOR_CARD_BORDER, self.back_button_rect, width=2, border_radius=8)
-        surf_btn = self.font_btn.render("← BUMALIK (TITLE)", True, COLOR_TEXT_PRIMARY)
-        surface.blit(surf_btn, surf_btn.get_rect(center=self.back_button_rect.center))
+        # 6. Pause Button
+        btn_bg = COLOR_BRICK_RED if not self.is_pause_hovered else (240, 85, 80)
+        pygame.draw.rect(surface, btn_bg, self.pause_button_rect, border_radius=8)
+        pygame.draw.rect(surface, COLOR_CARD_BORDER, self.pause_button_rect, width=2, border_radius=8)
+        surf_btn = self.font_btn.render("⏸ PAUSE [ESC]", True, COLOR_TEXT_PRIMARY)
+        surface.blit(surf_btn, surf_btn.get_rect(center=self.pause_button_rect.center))
