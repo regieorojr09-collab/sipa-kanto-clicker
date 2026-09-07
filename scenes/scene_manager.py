@@ -5,6 +5,8 @@ from typing import Any, List, Optional
 import pygame
 from pygame.math import Vector2
 
+from ui.fx import TransitionOverlay
+
 
 class Scene(ABC):
     """
@@ -44,11 +46,13 @@ class SceneManager:
     Stack-based scene director supporting:
     - push(): Adds a modal scene over the current (e.g. Pause overlay).
     - pop(): Removes the top scene and resumes the one beneath it.
-    - switch(): Replaces the current scene tree with a new active scene.
+    - switch(): Replaces the current scene tree with a new active scene immediately.
+    - switch_with_transition(): Fades to black, switches scene at midpoint, and fades back in.
     """
 
     def __init__(self) -> None:
         self._stack: List[Scene] = []
+        self.transition: TransitionOverlay = TransitionOverlay()
 
     @property
     def current_scene(self) -> Optional[Scene]:
@@ -84,17 +88,35 @@ class SceneManager:
         self._stack.append(scene)
         scene.on_enter(**kwargs)
 
+    def switch_with_transition(self, scene: Scene, duration: float = 0.5, **kwargs: Any) -> None:
+        """Smoothly fades to black, switches scene at midpoint, and fades back in."""
+        if self.transition.is_active or duration <= 0.0:
+            self.switch(scene, **kwargs)
+            return
+
+        def _midpoint_switch() -> None:
+            self.switch(scene, **kwargs)
+
+        self.transition.start_transition(on_midpoint_callback=_midpoint_switch, duration=duration)
+
     def handle_event(self, event: pygame.event.Event, logical_mouse_pos: Vector2) -> None:
         """Dispatches input events to the active top scene."""
+        # Suppress clicks during fade-out to prevent double triggers
+        if self.transition.is_active and self.transition.state == "FADING_OUT":
+            return
+
         if self.current_scene:
             self.current_scene.handle_event(event, logical_mouse_pos)
 
     def update(self, dt: float) -> None:
-        """Updates the active top scene."""
+        """Updates the active top scene and advances transition overlay."""
+        self.transition.update(dt)
         if self.current_scene:
             self.current_scene.update(dt)
 
     def draw(self, surface: pygame.Surface) -> None:
-        """Renders the active top scene to the logical surface."""
+        """Renders the active top scene to the logical surface, followed by any transition overlay."""
         if self.current_scene:
             self.current_scene.draw(surface)
+        self.transition.draw(surface)
+

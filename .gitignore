@@ -15,6 +15,9 @@ venv/
 ENV/
 env/
 
+# Planning docs
+implementation_plan.md
+
 # IDE & OS files
 .idea/
 .vscode/

@@ -33,6 +33,7 @@ from systems.scoring import ScoreKeeper
 from systems.difficulty import DifficultyController, DifficultyLevel
 from systems.audio import AudioManager
 from ui.hud import HUD
+from ui.scenery import StreetScenery
 from ui.fx import ParticleEmitter, ScreenShake
 from scenes.scene_manager import Scene, SceneManager
 
@@ -79,7 +80,9 @@ class PlayScene(Scene):
     - HitSystem approach rings with difficulty scaling
     - DifficultyController (Pikon Meter, Hangin, Bilis, Dalawa modifiers)
     - ScoreKeeper & live HUD
-    - Procedural audio & VFX (ScreenShake, ParticleEmitter)
+    - Procedural StreetScenery parallax background & dynamic rage lighting
+    - Procedural BGM synthesizer with dynamic tempo scaling & crowd cheering
+    - VFX (ScreenShake, ParticleEmitter)
     - Round quota and transition to ResultsScene
     """
 
@@ -93,7 +96,8 @@ class PlayScene(Scene):
         self.avatar: Avatar = Avatar(x=460.0, y=GROUND_Y)
         self.taya: Taya = Taya(x=130.0, y=GROUND_Y)
 
-        # Systems
+        # Scenery & Systems
+        self.scenery: StreetScenery = StreetScenery()
         self.difficulty_controller: DifficultyController = DifficultyController(level=self.difficulty_level)
         self.score_keeper: ScoreKeeper = ScoreKeeper(difficulty_mult=self.difficulty_controller.level.score_mult)
         self.hit_system: HitSystem = HitSystem()
@@ -119,6 +123,7 @@ class PlayScene(Scene):
         # Pause / Menu Button
         self.pause_button_rect: pygame.Rect = pygame.Rect(32, 24, 180, 42)
         self.is_pause_hovered: bool = False
+        self._is_paused: bool = False
 
         # Fonts
         self.font_court: Optional[pygame.font.Font] = None
@@ -133,6 +138,12 @@ class PlayScene(Scene):
 
     def on_enter(self, **kwargs) -> None:
         self._init_fonts()
+        # If resuming from pause overlay, simply resume audio and keep state intact
+        if self._is_paused:
+            self._is_paused = False
+            self.audio_manager.resume_bgm()
+            return
+
         if "difficulty_level" in kwargs and kwargs["difficulty_level"]:
             self.difficulty_level = kwargs["difficulty_level"]
             self.difficulty_controller.level = self.difficulty_level
@@ -144,10 +155,18 @@ class PlayScene(Scene):
         self.sipa.reset(x=380.0, y=GROUND_Y)
         self.avatar.pos = Vector2(460.0, GROUND_Y)
         self.taya.pos = Vector2(130.0, GROUND_Y)
+
+        self.audio_manager.start_bgm()
         event_bus.publish(GameEvent.ROUND_START)
 
     def on_exit(self) -> None:
+        # If suspended by a modal overlay (e.g. PauseOverlay), pause BGM without destroying gameplay state
+        if self._is_paused:
+            self.audio_manager.pause_bgm()
+            return
+
         event_bus.unsubscribe(GameEvent.HIT_RESULT, self._on_game_hit_result)
+        self.audio_manager.stop_bgm()
         self.score_keeper.destroy()
         self.hud.destroy()
         self.hit_system.clear()
@@ -159,15 +178,18 @@ class PlayScene(Scene):
 
     def _restart_round(self) -> None:
         """Restarts the active round from zero."""
+        self._is_paused = False
         self.score_keeper.reset()
         self.difficulty_controller.reset()
         self.hit_system.clear()
         self.serves_completed = 0
         self.has_spawned_target_for_arc = False
+        self.audio_manager.resume_bgm()
         self.serve_sipa()
 
     def _finish_round(self) -> None:
         """Transitions to the round results screen."""
+        self._is_paused = False
         from scenes.results_scene import ResultsScene
         stats = self.score_keeper.get_stats()
         event_bus.publish(
@@ -176,7 +198,11 @@ class PlayScene(Scene):
             final_score=self.score_keeper.score,
             max_combo=self.score_keeper.max_combo
         )
-        self.manager.switch(ResultsScene(self.manager, stats=stats, difficulty_level=self.difficulty_level))
+        self.audio_manager.stop_bgm()
+        self.manager.switch_with_transition(
+            ResultsScene(self.manager, stats=stats, difficulty_level=self.difficulty_level),
+            duration=0.35
+        )
 
     def serve_sipa(self) -> None:
         """Launches a new sipa from court sidelines toward center with wind and Taya callout."""
@@ -224,12 +250,15 @@ class PlayScene(Scene):
             self._process_hit_attempt()
 
     def _open_pause_menu(self) -> None:
-        """Pushes the pause overlay on top of the active scene."""
+        """Pushes the pause overlay on top of the active scene and pauses BGM."""
+        self._is_paused = True
+        self.audio_manager.pause_bgm()
         from ui.menus import PauseOverlay
         self.manager.push(PauseOverlay(self.manager, on_restart_callback=self._restart_round))
 
+
     def _on_game_hit_result(self, judgment: str, was_miss: bool = False, position: tuple = (640, 360), **kwargs) -> None:
-        """Unified responder for hit/miss events: drives SFX, ripples, screen shake, and particles."""
+        """Unified responder for hit/miss events: drives SFX, ripples, screen shake, particles, and crowd cheers."""
         target_pos = Vector2(position[0], position[1]) if isinstance(position, (tuple, list)) else Vector2(position)
 
         if not was_miss:
@@ -245,11 +274,11 @@ class PlayScene(Scene):
                 colors=[COLOR_SUNSHINE, COLOR_RETRO_CYAN, COLOR_TASSEL_GOLD, COLOR_TASSEL_GREEN]
             )
 
-            # 3. Check Combo Milestones (every 10 combo)
+            # 3. Check Combo Milestones (10 and 20+ combos trigger spectator crowd cheering)
             combo = self.score_keeper.current_combo
             if combo > 0 and combo % 10 == 0:
                 event_bus.publish(GameEvent.COMBO_MILESTONE, combo_count=combo)
-                self.audio_manager.play_cheer()
+                self.audio_manager.play_crowd_cheer(combo)
         else:
             # Miss feedback
             self.audio_manager.play_miss()
@@ -295,7 +324,11 @@ class PlayScene(Scene):
         # 1. Update Difficulty Controller (Pikon decay, modifiers)
         self.difficulty_controller.update(dt)
 
-        # 2. Update Entities
+        # 2. Update Scenery & Dynamic BGM tempo
+        self.scenery.update(dt, self.difficulty_controller.pikon_meter)
+        self.audio_manager.update_bgm(self.difficulty_controller.pikon_meter)
+
+        # 3. Update Entities
         self.sipa.update(dt)
 
         if self.hit_system.active_targets:
@@ -306,7 +339,7 @@ class PlayScene(Scene):
         self.avatar.update(dt, current_time_sec)
         self.taya.update(dt)
 
-        # 3. Check trajectory apex to predict landing and spawn approach ring
+        # 4. Check trajectory apex to predict landing and spawn approach ring
         if self.sipa.is_airborne and self.sipa.vel.y >= 0.0 and not self.has_spawned_target_for_arc:
             self.has_spawned_target_for_arc = True
             pred_x, pred_y, arrival_ms = self.sipa.predict_landing(KICK_TARGET_Y)
@@ -336,13 +369,13 @@ class PlayScene(Scene):
                         t_duration=dur * 0.85
                     )
 
-        # 4. Update Hit System (processes expired/missed targets)
+        # 5. Update Hit System (processes expired/missed targets)
         expired_events = self.hit_system.update(current_time_ms)
         if expired_events:
             self.audio_manager.play_miss()
             self.screen_shake.add_trauma(0.45)
 
-        # 5. Handle Ground Landing & Serve Resets or Round Complete
+        # 6. Handle Ground Landing & Serve Resets or Round Complete
         if self.sipa.is_grounded and not self.is_serving:
             if self.serves_completed >= self.max_serves:
                 self._finish_round()
@@ -357,7 +390,7 @@ class PlayScene(Scene):
             if self.serve_timer <= 0.0:
                 self.serve_sipa()
 
-        # 6. Update VFX & UI
+        # 7. Update VFX & UI
         self.screen_shake.update(dt)
         self.particle_emitter.update(dt)
 
@@ -372,34 +405,19 @@ class PlayScene(Scene):
         assert self.font_court and self.font_btn and self.font_quota
         current_time_ms = float(pygame.time.get_ticks())
 
-        # Camera Shake Offset (applied to world geometry only)
+        # Camera Shake Offset (applied to scenery and world geometry)
         cam = self.screen_shake.get_offset()
         ox, oy = int(cam.x), int(cam.y)
 
-        # 1. Clear background
-        surface.fill(COLOR_BG_DARK)
-
-        # 2. Street asphalt road
-        asphalt_rect = pygame.Rect(
-            0,
-            int(GROUND_Y) - 50 + oy,
-            LOGICAL_W,
-            LOGICAL_H - int(GROUND_Y) + 50
-        )
-        pygame.draw.rect(surface, COLOR_ASPHALT, asphalt_rect)
-
-        # Street pavement chalk baseline & perspective lines
-        pygame.draw.line(surface, COLOR_CHALK, (0, int(GROUND_Y) + oy), (LOGICAL_W, int(GROUND_Y) + oy), 3)
-        pygame.draw.line(surface, COLOR_CHALK, (220 + ox, int(GROUND_Y) + oy), (340 + ox, LOGICAL_H), 2)
-        pygame.draw.line(surface, COLOR_CHALK, (LOGICAL_W - 220 + ox, int(GROUND_Y) + oy), (LOGICAL_W - 340, LOGICAL_H), 2)
-        pygame.draw.line(surface, COLOR_CHALK, (LOGICAL_CENTER_X + ox, int(GROUND_Y) + oy), (LOGICAL_CENTER_X + ox, LOGICAL_H), 2)
+        # 1. Render Procedural Street Scenery (Background, clouds, skyline, sari-sari store, tricycle, asphalt)
+        self.scenery.draw(surface, cam)
 
         # Kicking zone guideline
         pygame.draw.line(surface, (65, 72, 92), (60, int(KICK_TARGET_Y) + oy), (LOGICAL_W - 60, int(KICK_TARGET_Y) + oy), 1)
         surf_kick_lbl = self.font_court.render("KICK ZONE", True, (90, 98, 120))
         surface.blit(surf_kick_lbl, (70, int(KICK_TARGET_Y) - 18 + oy))
 
-        # 3. World Entities (Offset by screen shake)
+        # 2. World Entities (Offset by screen shake)
         world_surf = pygame.Surface((LOGICAL_W, LOGICAL_H), pygame.SRCALPHA)
 
         self.taya.draw(world_surf)
@@ -413,24 +431,24 @@ class PlayScene(Scene):
 
         surface.blit(world_surf, (ox, oy))
 
-        # 4. Fixed UI Overlay (No Screen Shake for crisp readability)
+        # 3. Fixed UI Overlay (No Screen Shake for crisp readability)
         self.hud.draw(surface)
 
         # Round Progress / Quota Tracker
-        serves_left = max(0, self.max_serves - self.serves_completed)
         quota_str = f"TIRA (SERVES): {self.serves_completed}/{self.max_serves}"
         surf_quota = self.font_quota.render(quota_str, True, COLOR_TEXT_MUTED)
         surface.blit(surf_quota, (34, 76))
 
-        # 5. Cursor Crosshair at Logical Mouse Position
+        # 4. Cursor Crosshair at Logical Mouse Position
         mx, my = int(self.mouse_pos.x), int(self.mouse_pos.y)
         pygame.draw.circle(surface, COLOR_TEXT_PRIMARY, (mx, my), 5, width=1)
         pygame.draw.line(surface, COLOR_TEXT_PRIMARY, (mx - 10, my), (mx + 10, my), 1)
         pygame.draw.line(surface, COLOR_TEXT_PRIMARY, (mx, my - 10), (mx, my + 10), 1)
 
-        # 6. Pause Button
+        # 5. Pause Button
         btn_bg = COLOR_BRICK_RED if not self.is_pause_hovered else (240, 85, 80)
         pygame.draw.rect(surface, btn_bg, self.pause_button_rect, border_radius=8)
         pygame.draw.rect(surface, COLOR_CARD_BORDER, self.pause_button_rect, width=2, border_radius=8)
         surf_btn = self.font_btn.render("⏸ PAUSE [ESC]", True, COLOR_TEXT_PRIMARY)
         surface.blit(surf_btn, surf_btn.get_rect(center=self.pause_button_rect.center))
+

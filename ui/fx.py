@@ -183,3 +183,86 @@ class ScreenShake:
         offset_x = (random.random() * 2.0 - 1.0) * self.max_offset * shake_factor
         offset_y = (random.random() * 2.0 - 1.0) * self.max_offset * shake_factor
         return Vector2(offset_x, offset_y)
+
+
+class TransitionState:
+    IDLE = "IDLE"
+    FADING_OUT = "FADING_OUT"
+    FADING_IN = "FADING_IN"
+
+
+class TransitionOverlay:
+    """
+    Manages non-blocking screen fade-to-black and fade-in transitions between scenes.
+    Ensures steady 60 FPS in Pygbag WebAssembly without freezing execution.
+    """
+
+    def __init__(self, width: int = 1280, height: int = 720) -> None:
+        self.width: int = width
+        self.height: int = height
+        self.state: str = TransitionState.IDLE
+        self.timer: float = 0.0
+        self.half_duration: float = 0.25
+        self.on_midpoint_callback = None
+        self._surface: pygame.Surface = pygame.Surface((width, height), pygame.SRCALPHA)
+
+    @property
+    def is_active(self) -> bool:
+        """Returns whether a screen transition is actively fading."""
+        return self.state != TransitionState.IDLE
+
+    @property
+    def alpha(self) -> int:
+        """Returns the current opacity of the black overlay (0 to 255)."""
+        if self.state == TransitionState.IDLE:
+            return 0
+        elif self.state == TransitionState.FADING_OUT:
+            progress = min(1.0, max(0.0, self.timer / self.half_duration))
+            return int(progress * 255)
+        elif self.state == TransitionState.FADING_IN:
+            progress = min(1.0, max(0.0, self.timer / self.half_duration))
+            return int((1.0 - progress) * 255)
+        return 0
+
+    def start_transition(self, on_midpoint_callback=None, duration: float = 0.5) -> None:
+        """
+        Starts a fade-out to black, triggers callback at the midpoint (full black),
+        then fades back in to reveal the new scene.
+        """
+        self.half_duration = max(0.05, duration / 2.0)
+        self.timer = 0.0
+        self.state = TransitionState.FADING_OUT
+        self.on_midpoint_callback = on_midpoint_callback
+
+    def update(self, dt: float) -> None:
+        """Advances the transition timer and manages state switches."""
+        if self.state == TransitionState.IDLE:
+            return
+
+        self.timer += dt
+
+        if self.state == TransitionState.FADING_OUT:
+            if self.timer >= self.half_duration:
+                # Transition point reached: execute scene change callback
+                if self.on_midpoint_callback:
+                    cb = self.on_midpoint_callback
+                    self.on_midpoint_callback = None
+                    cb()
+
+                # Begin fading in
+                self.state = TransitionState.FADING_IN
+                self.timer = 0.0
+
+        elif self.state == TransitionState.FADING_IN:
+            if self.timer >= self.half_duration:
+                # Transition complete
+                self.state = TransitionState.IDLE
+                self.timer = 0.0
+
+    def draw(self, surface: pygame.Surface) -> None:
+        """Renders the black transition overlay if active."""
+        cur_alpha = self.alpha
+        if cur_alpha > 0:
+            self._surface.fill((0, 0, 0, cur_alpha))
+            surface.blit(self._surface, (0, 0))
+

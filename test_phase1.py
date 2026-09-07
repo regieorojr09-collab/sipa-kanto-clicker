@@ -139,6 +139,10 @@ class TestPhase1Foundation(unittest.TestCase):
         click_event = pygame.event.Event(pygame.MOUSEBUTTONDOWN, {"button": 1, "pos": title.button_rect.center})
         title.handle_event(click_event, Vector2(title.button_rect.centerx, title.button_rect.centery))
 
+        # Advance manager past transition midpoint if transition overlay is active
+        if hasattr(manager, "transition") and manager.transition.is_active:
+            manager.update(manager.transition.half_duration + 0.05)
+
         # Should have transitioned to PlayScene
         self.assertIsInstance(manager.current_scene, PlayScene)
         play = manager.current_scene

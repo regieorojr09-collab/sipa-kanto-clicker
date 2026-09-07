@@ -126,7 +126,10 @@ class TitleScene(Scene):
             event_bus.publish(GameEvent.AUDIO_UNLOCK)
 
         from scenes.play_scene import PlayScene
-        self.manager.switch(PlayScene(self.manager, difficulty_level=self.selected_difficulty))
+        self.manager.switch_with_transition(
+            PlayScene(self.manager, difficulty_level=self.selected_difficulty),
+            duration=0.35
+        )
 
     def update(self, dt: float) -> None:
         self.time_elapsed += dt
