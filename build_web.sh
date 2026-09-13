@@ -14,6 +14,9 @@ fi
 echo "Running Pygbag compiler..."
 python3 -m pygbag --build .
 
+# Create .nojekyll so GitHub Pages bypasses Jekyll
+touch build/web/.nojekyll
+
 echo ""
 echo "=== Build Complete! ==="
 echo "WebAssembly bundle exported to: build/web/"

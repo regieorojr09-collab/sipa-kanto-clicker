@@ -10,6 +10,9 @@ if exist "build\web" (
 echo Running Pygbag compiler...
 python -m pygbag --build .
 
+REM Create .nojekyll so GitHub Pages bypasses Jekyll
+type nul > "build\web\.nojekyll"
+
 echo.
 echo === Build Complete! ===
 echo WebAssembly bundle exported to: build\web\

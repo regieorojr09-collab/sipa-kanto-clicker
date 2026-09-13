@@ -94,7 +94,8 @@ def _synthesize_bgm_track(tempo_bpm: float = 120.0, is_rage: bool = False, sampl
 class AudioManager:
     """
     Manages sound synthesis and audio playback.
-    Pre-synthesizes procedural retro SFX and looping BGM into memory.
+    Pre-synthesizes procedural retro SFX and looping BGM into memory strictly ONCE at init.
+    Guarantees zero re-synthesis and zero buffer allocations during hit events for 60 FPS in WebAssembly.
     Safely unlocks browser AudioContext on first click.
     Fails completely silently in headless / missing audio environments.
     """

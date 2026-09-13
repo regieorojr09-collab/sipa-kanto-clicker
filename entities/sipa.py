@@ -48,6 +48,9 @@ class Sipa:
             COLOR_TASSEL_GREEN,
         ]
 
+        # Reusable scratch surface for motion trail rendering (eliminates per-frame allocations)
+        self._scratch_trail_surf: pygame.Surface = pygame.Surface((40, 40), pygame.SRCALPHA)
+
     def launch(self, velocity: Vector2, spin: float = 2.0, wind_force: float = 0.0) -> None:
         """Launches or kicks the sipa with velocity, spin, and active lateral wind force."""
         self.vel = Vector2(velocity.x, velocity.y)
@@ -163,21 +166,23 @@ class Sipa:
 
     def draw(self, surface: pygame.Surface) -> None:
         """Draws the decaying motion trail, colorful plastic tassels, and lead washer."""
-        # 1. Motion Trail
+        # 1. Motion Trail (using reusable scratch surface to eliminate allocations)
         trail_len = len(self.trail_points)
         for i, (t_pos, t_angle) in enumerate(self.trail_points):
             factor = (i + 1) / (trail_len + 1)
             radius = max(2, int(SIPA_RADIUS * factor * 0.7))
             alpha = int(140 * factor)
-            trail_surf = pygame.Surface((radius * 2 + 2, radius * 2 + 2), pygame.SRCALPHA)
+            d = radius * 2 + 2
+            scratch_rect = pygame.Rect(0, 0, d, d)
+            self._scratch_trail_surf.fill((0, 0, 0, 0), scratch_rect)
             color = self._tassel_colors[i % len(self._tassel_colors)]
             pygame.draw.circle(
-                trail_surf,
+                self._scratch_trail_surf,
                 (*color, alpha),
                 (radius + 1, radius + 1),
                 radius
             )
-            surface.blit(trail_surf, (t_pos.x - radius - 1, t_pos.y - radius - 1))
+            surface.blit(self._scratch_trail_surf, (int(t_pos.x - radius - 1), int(t_pos.y - radius - 1)), scratch_rect)
 
         # 2. Plastic Tassels
         cx, cy = int(self.pos.x), int(self.pos.y)

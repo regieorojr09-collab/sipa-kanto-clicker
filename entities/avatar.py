@@ -233,8 +233,12 @@ class Avatar:
         self.buffered_time_sec: float = 0.0
         self.buffer_window_sec: float = 0.20  # 200 ms buffer window
 
-        # Procedural sprite cache
+        # Procedural sprite cache (pre-rendered both facing directions to eliminate per-frame flip allocations)
         self.frames: Dict[AvatarState, List[pygame.Surface]] = _generate_procedural_avatar_frames()
+        self.frames_flipped: Dict[AvatarState, List[pygame.Surface]] = {
+            state: [pygame.transform.flip(f, True, False) for f in f_list]
+            for state, f_list in self.frames.items()
+        }
 
         # Subscribe to gameplay events
         event_bus.subscribe(GameEvent.HIT_RESULT, self._on_hit_result)
@@ -355,13 +359,11 @@ class Avatar:
         self.target_x = max(180.0, min(1100.0, target_x + offset))
 
     def draw(self, surface: pygame.Surface) -> None:
-        """Renders the current frame, flipped horizontally if facing left."""
-        frame_list = self.frames.get(self.current_state, self.frames[AvatarState.IDLE])
+        """Renders the current frame, utilizing pre-cached flipped surfaces when facing left."""
+        frames_dict = self.frames if self.facing_right else self.frames_flipped
+        frame_list = frames_dict.get(self.current_state, frames_dict[AvatarState.IDLE])
         safe_index = min(self.frame_index, len(frame_list) - 1)
         frame_surf = frame_list[safe_index]
-
-        if not self.facing_right:
-            frame_surf = pygame.transform.flip(frame_surf, True, False)
 
         # Draw centered horizontally, with feet on pos.y (GROUND_Y)
         draw_x = int(self.pos.x - 64)
