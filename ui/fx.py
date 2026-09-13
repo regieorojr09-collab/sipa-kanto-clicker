@@ -16,6 +16,18 @@ from core.settings import (
 )
 
 
+# Shared scratch surface to avoid per-particle allocations in WebAssembly
+_SCRATCH_PARTICLE_SURF: Optional[pygame.Surface] = None
+
+
+def _get_particle_scratch_surf(min_size: int) -> pygame.Surface:
+    global _SCRATCH_PARTICLE_SURF
+    size = max(48, min_size)
+    if _SCRATCH_PARTICLE_SURF is None or _SCRATCH_PARTICLE_SURF.get_width() < size:
+        _SCRATCH_PARTICLE_SURF = pygame.Surface((size, size), pygame.SRCALPHA)
+    return _SCRATCH_PARTICLE_SURF
+
+
 class Particle:
     """Individual animated spark/star particle with gravity, drag, and alpha fading."""
 
@@ -62,7 +74,9 @@ class Particle:
         current_size = max(1.0, self.size * (0.3 + (0.7 * life_factor)))
 
         int_size = int(current_size * 2) + 4
-        particle_surf = pygame.Surface((int_size, int_size), pygame.SRCALPHA)
+        scratch = _get_particle_scratch_surf(int_size)
+        scratch_rect = pygame.Rect(0, 0, int_size, int_size)
+        scratch.fill((0, 0, 0, 0), scratch_rect)
         center = (int_size // 2, int_size // 2)
 
         if self.is_star:
@@ -74,17 +88,21 @@ class Particle:
                 (center[0], center[1] + r),
                 (center[0] - (r * 0.4), center[1]),
             ]
-            pygame.draw.polygon(particle_surf, (*self.color, alpha), points)
+            pygame.draw.polygon(scratch, (*self.color, alpha), points)
         else:
             # Draw glowing spark circle
             pygame.draw.circle(
-                particle_surf,
+                scratch,
                 (*self.color, alpha),
                 center,
                 int(current_size)
             )
 
-        surface.blit(particle_surf, (self.pos.x - center[0], self.pos.y - center[1]))
+        surface.blit(scratch, (int(self.pos.x - center[0]), int(self.pos.y - center[1])), scratch_rect)
+
+
+# Strict capacity cap for particle pool to prevent GC spikes in WebAssembly
+HARD_MAX_PARTICLES: int = 60
 
 
 class ParticleEmitter:
@@ -92,14 +110,14 @@ class ParticleEmitter:
     Manages active particle pool with capacity caps to safeguard 60 FPS in WebAssembly.
     """
 
-    def __init__(self, max_particles: int = 160) -> None:
-        self.max_particles: int = max_particles
+    def __init__(self, max_particles: int = 50) -> None:
+        self.max_particles: int = min(max_particles, HARD_MAX_PARTICLES)
         self.particles: List[Particle] = []
 
     def burst(
         self,
         pos: Vector2,
-        count: int = 18,
+        count: int = 14,
         colors: Optional[List[Tuple[int, int, int]]] = None,
         speed_min: float = 100.0,
         speed_max: float = 340.0,
@@ -138,10 +156,15 @@ class ParticleEmitter:
             self.particles.append(p)
 
     def update(self, dt: float) -> None:
-        """Advances active particles and prunes dead ones."""
-        for p in self.particles:
+        """Advances active particles and prunes dead ones in-place to prevent GC allocations."""
+        alive_idx = 0
+        for i in range(len(self.particles)):
+            p = self.particles[i]
             p.update(dt)
-        self.particles = [p for p in self.particles if p.is_alive]
+            if p.is_alive:
+                self.particles[alive_idx] = p
+                alive_idx += 1
+        del self.particles[alive_idx:]
 
     def draw(self, surface: pygame.Surface) -> None:
         """Renders all alive particles."""

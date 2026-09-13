@@ -86,11 +86,23 @@ class StreetScenery:
         self.time_elapsed: float = 0.0
 
         # Cached procedural surfaces
+        try:
+            self.static_bg: pygame.Surface = pygame.Surface((LOGICAL_W, LOGICAL_H)).convert()
+        except Exception:
+            self.static_bg = pygame.Surface((LOGICAL_W, LOGICAL_H))
+        self.static_bg_surface: pygame.Surface = self.static_bg  # Backwards compatibility alias
+
         self.sky_surface: pygame.Surface = pygame.Surface((LOGICAL_W, int(GROUND_Y) + 20))
         self.city_silhouette: pygame.Surface = pygame.Surface((LOGICAL_W, int(GROUND_Y)), pygame.SRCALPHA)
         self.sari_sari_surface: pygame.Surface = pygame.Surface((400, 260), pygame.SRCALPHA)
         self.tricycle_surface: pygame.Surface = pygame.Surface((220, 160), pygame.SRCALPHA)
         self.asphalt_surface: pygame.Surface = pygame.Surface((LOGICAL_W, LOGICAL_H - int(GROUND_Y) + 50))
+
+        # Reusable Rage-Mode Tint Overlay (Pikon >= 80%)
+        self.rage_overlay: pygame.Surface = pygame.Surface((LOGICAL_W, LOGICAL_H))
+        self.rage_overlay.fill((210, 45, 18))
+        self.rage_factor: float = 0.0
+        self._last_rendered_rage: float = -1.0
 
         # Fonts
         self.font_sign: Optional[pygame.font.Font] = None
@@ -112,7 +124,7 @@ class StreetScenery:
             [(1020, 628), (1048, 640), (1072, 636), (1100, 652)],
         ]
 
-        # Initialize surfaces
+        # Initialize surfaces and bake pre-rendered static background
         self._init_static_layers()
 
     def _init_fonts(self) -> None:
@@ -120,7 +132,7 @@ class StreetScenery:
             self.font_sign = pygame.font.Font(None, 20)
 
     def _init_static_layers(self) -> None:
-        """Pre-renders static procedural visual components."""
+        """Pre-renders static procedural visual components onto static_bg ONCE."""
         self._init_fonts()
         self._render_distant_silhouette()
         self._render_sari_sari_store()
@@ -128,11 +140,41 @@ class StreetScenery:
         self._render_asphalt()
         self._update_sky_gradient(0.0)
 
+        # Pre-render all static elements onto static_bg once
+        self.static_bg.blit(self.sky_surface, (0, 0))
+        self.static_bg.blit(self.city_silhouette, (0, 0))
+
+        store_x = LOGICAL_W - 420
+        store_y = int(GROUND_Y) - 250
+        self.static_bg.blit(self.sari_sari_surface, (store_x, store_y))
+
+        trike_x = 35
+        trike_y = int(GROUND_Y) - 150
+        self.static_bg.blit(self.tricycle_surface, (trike_x, trike_y))
+
+        road_y = int(GROUND_Y) - 50
+        self.static_bg.blit(self.asphalt_surface, (0, road_y))
+
+        # Road cracks
+        for crack in self.cracks:
+            pygame.draw.lines(self.static_bg, (18, 20, 26), False, crack, 2)
+
+        # White chalk court boundary lines
+        gy = int(GROUND_Y)
+        pygame.draw.line(self.static_bg, COLOR_CHALK, (0, gy), (LOGICAL_W, gy), 3)
+        pygame.draw.line(self.static_bg, COLOR_CHALK, (220, gy), (340, LOGICAL_H), 2)
+        pygame.draw.line(self.static_bg, COLOR_CHALK, (LOGICAL_W - 220, gy), (LOGICAL_W - 340, LOGICAL_H), 2)
+        pygame.draw.line(self.static_bg, COLOR_CHALK, (LOGICAL_CENTER_X, gy), (LOGICAL_CENTER_X, LOGICAL_H), 2)
+
     def _update_sky_gradient(self, rage_factor: float) -> None:
         """
         Renders sky gradient vertically.
         Shifts from deep twilight navy/blue to intense sunset amber/orange when rage_factor > 0.
+        Skips recalculation if rage_factor has not meaningfully changed.
         """
+        if abs(rage_factor - self._last_rendered_rage) < 0.01:
+            return
+        self._last_rendered_rage = rage_factor
         h = self.sky_surface.get_height()
 
         # Base dusk sky colors
@@ -374,50 +416,36 @@ class StreetScenery:
 
         # Rage lighting factor (active only when Pikon Meter >= 80%)
         rage_factor = max(0.0, min(1.0, (self.pikon_meter - 80.0) / 20.0))
+        self.rage_factor = rage_factor
         self._update_sky_gradient(rage_factor)
 
-    def draw(self, surface: pygame.Surface, offset: Vector2 = Vector2(0, 0)) -> None:
+    def draw(
+        self,
+        surface: pygame.Surface,
+        camera_offset: Optional[Vector2] = None,
+        pikon_ratio: Optional[float] = None,
+        offset: Optional[Vector2] = None,
+    ) -> None:
         """
         Renders complete street scenery with screen shake offset.
-        Visual hierarchy: Sky -> Clouds -> Distant Skyline/Poles -> Mid-ground Store & Tricycle -> Foreground Road & Chalk.
+        Performance optimization: Performs ONE single blit of pre-rendered static background,
+        then draws dynamic clouds and rage tint overlay.
         """
-        ox, oy = int(offset.x), int(offset.y)
+        cam = camera_offset if camera_offset is not None else (offset if offset is not None else Vector2(0, 0))
+        ox, oy = int(cam.x), int(cam.y)
 
-        # 1. Sky Gradient
-        surface.blit(self.sky_surface, (0, oy))
+        # 1. Single blit of pre-rendered static streetscape
+        surface.blit(self.static_bg, (ox, oy))
 
-        # 2. Clouds (subtle parallax)
+        # 2. Dynamic clouds (drifting with subtle parallax)
         for cloud in self.clouds:
-            cloud.draw(surface, offset)
+            cloud.draw(surface, cam)
 
-        # 3. Distant City Skyline & Utility Poles
-        surface.blit(self.city_silhouette, (int(ox * 0.4), int(oy * 0.4)))
-
-        # 4. Mid-ground Sari-Sari Store (Right Sideline)
-        store_x = LOGICAL_W - 420 + int(ox * 0.8)
-        store_y = int(GROUND_Y) - 250 + int(oy * 0.8)
-        surface.blit(self.sari_sari_surface, (store_x, store_y))
-
-        # 5. Mid-ground Parked Tricycle (Left Sideline)
-        trike_x = 35 + int(ox * 0.8)
-        trike_y = int(GROUND_Y) - 150 + int(oy * 0.8)
-        surface.blit(self.tricycle_surface, (trike_x, trike_y))
-
-        # 6. Foreground Asphalt Road
-        road_y = int(GROUND_Y) - 50 + oy
-        surface.blit(self.asphalt_surface, (0, road_y))
-
-        # 7. Procedural Road Cracks
-        for crack in self.cracks:
-            pts = [(px + ox, py + oy) for px, py in crack]
-            pygame.draw.lines(surface, (18, 20, 26), False, pts, 2)
-
-        # 8. White Chalk Boundary Lines (Guhit ng Kanto)
-        gy = int(GROUND_Y) + oy
-        # Main baseline across court
-        pygame.draw.line(surface, COLOR_CHALK, (0, gy), (LOGICAL_W, gy), 3)
-
-        # Court perspective depth guidelines
-        pygame.draw.line(surface, COLOR_CHALK, (220 + ox, gy), (340 + ox, LOGICAL_H), 2)
-        pygame.draw.line(surface, COLOR_CHALK, (LOGICAL_W - 220 + ox, gy), (LOGICAL_W - 340 + ox, LOGICAL_H), 2)
-        pygame.draw.line(surface, COLOR_CHALK, (LOGICAL_CENTER_X + ox, gy), (LOGICAL_CENTER_X + ox, LOGICAL_H), 2)
+        # 3. Dynamic Rage Mode color tint overlay (active when Pikon >= 80%)
+        effective_ratio = pikon_ratio if pikon_ratio is not None else (self.pikon_meter / 100.0)
+        if effective_ratio >= 0.8:
+            rage_intensity = min(1.0, max(0.0, (effective_ratio - 0.8) / 0.2))
+            alpha = int(rage_intensity * 85)
+            if alpha > 0:
+                self.rage_overlay.set_alpha(alpha)
+                surface.blit(self.rage_overlay, (ox, oy))

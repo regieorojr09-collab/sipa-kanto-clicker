@@ -43,6 +43,9 @@ class Engine:
         self.clock: pygame.time.Clock = pygame.time.Clock()
         self.delta_time: float = 0.0
 
+        # Cached scaled surface to prevent per-frame allocation in WebAssembly
+        self._cached_scaled_surface: Optional[pygame.Surface] = None
+
         # Apply browser canvas pixelation if running in Emscripten/Pygbag
         self._configure_web_canvas()
 
@@ -123,8 +126,17 @@ class Engine:
             # 1:1 match, direct blit without scaling overhead
             self.window_surface.blit(self.logical_surface, self.viewport_rect.topleft)
         else:
-            scaled_surface = pygame.transform.smoothscale(
+            # Fast nearest-neighbor direct scaling (pygame.transform.scale) for 60 FPS in WebAssembly.
+            # Avoids pygame.transform.smoothscale() which causes severe CPU rasterization lag.
+            if (
+                self._cached_scaled_surface is None
+                or self._cached_scaled_surface.get_size() != self.viewport_rect.size
+            ):
+                self._cached_scaled_surface = pygame.Surface(self.viewport_rect.size)
+
+            pygame.transform.scale(
                 self.logical_surface,
-                self.viewport_rect.size
+                self.viewport_rect.size,
+                self._cached_scaled_surface,
             )
-            self.window_surface.blit(scaled_surface, self.viewport_rect.topleft)
+            self.window_surface.blit(self._cached_scaled_surface, self.viewport_rect.topleft)
