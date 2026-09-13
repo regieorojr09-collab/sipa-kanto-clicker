@@ -24,6 +24,18 @@ from core.settings import (
 )
 
 
+# Shared scratch surface to eliminate per-target surface allocations in WebAssembly
+_SCRATCH_DISC_SURF: Optional[pygame.Surface] = None
+
+
+def _get_disc_scratch_surf(min_size: int) -> pygame.Surface:
+    global _SCRATCH_DISC_SURF
+    size = max(96, min_size)
+    if _SCRATCH_DISC_SURF is None or _SCRATCH_DISC_SURF.get_width() < size:
+        _SCRATCH_DISC_SURF = pygame.Surface((size, size), pygame.SRCALPHA)
+    return _SCRATCH_DISC_SURF
+
+
 class TargetState(Enum):
     """Lifecycle states of a HitTarget."""
     ACTIVE = auto()
@@ -105,9 +117,11 @@ class HitTarget:
         ring_r = int(self.get_current_ring_radius(current_time_ms))
         hit_r = int(self.r_hit)
 
-        # 1. Inner Clickable Disc (Translucent card fill)
+        # 1. Inner Clickable Disc (Translucent card fill using reusable scratch surface)
         disc_size = (hit_r * 2) + 4
-        disc_surf = pygame.Surface((disc_size, disc_size), pygame.SRCALPHA)
+        disc_surf = _get_disc_scratch_surf(disc_size)
+        disc_rect = pygame.Rect(0, 0, disc_size, disc_size)
+        disc_surf.fill((0, 0, 0, 0), disc_rect)
         center_offset = (disc_size // 2, disc_size // 2)
 
         # Translucent body
@@ -117,7 +131,7 @@ class HitTarget:
         # Center bullseye dot
         pygame.draw.circle(disc_surf, (255, 255, 255), center_offset, 4)
 
-        surface.blit(disc_surf, (cx - center_offset[0], cy - center_offset[1]))
+        surface.blit(disc_surf, (cx - center_offset[0], cy - center_offset[1]), disc_rect)
 
         # 2. Outer Shrinking Approach Ring (Osu!-style)
         if ring_r > hit_r:

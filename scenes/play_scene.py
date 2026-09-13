@@ -38,6 +38,18 @@ from ui.fx import ParticleEmitter, ScreenShake
 from scenes.scene_manager import Scene, SceneManager
 
 
+# Shared scratch surface to eliminate per-ripple allocations in WebAssembly
+_SCRATCH_RIPPLE_SURF: Optional[pygame.Surface] = None
+
+
+def _get_ripple_scratch_surf(min_size: int) -> pygame.Surface:
+    global _SCRATCH_RIPPLE_SURF
+    size = max(64, min_size)
+    if _SCRATCH_RIPPLE_SURF is None or _SCRATCH_RIPPLE_SURF.get_width() < size:
+        _SCRATCH_RIPPLE_SURF = pygame.Surface((size, size), pygame.SRCALPHA)
+    return _SCRATCH_RIPPLE_SURF
+
+
 class HitRippleVFX:
     """Visual feedback ring produced on a successful kick or target hit."""
 
@@ -59,16 +71,18 @@ class HitRippleVFX:
         if not self.is_alive or self.alpha <= 0.0:
             return
         size = int(self.radius * 2) + 4
-        surf = pygame.Surface((size, size), pygame.SRCALPHA)
+        scratch = _get_ripple_scratch_surf(size)
+        scratch_rect = pygame.Rect(0, 0, size, size)
+        scratch.fill((0, 0, 0, 0), scratch_rect)
         center = (size // 2, size // 2)
         pygame.draw.circle(
-            surf,
+            scratch,
             (*self.color, max(0, min(255, int(self.alpha)))),
             center,
             int(self.radius),
             width=3
         )
-        surface.blit(surf, (self.pos.x + offset.x - center[0], self.pos.y + offset.y - center[1]))
+        surface.blit(scratch, (self.pos.x + offset.x - center[0], self.pos.y + offset.y - center[1]), scratch_rect)
 
 
 class PlayScene(Scene):
@@ -125,16 +139,28 @@ class PlayScene(Scene):
         self.is_pause_hovered: bool = False
         self._is_paused: bool = False
 
-        # Fonts
+        # Persistent world surface for entities (eliminates per-frame 1280x720 surface allocation)
+        self.world_surf: pygame.Surface = pygame.Surface((LOGICAL_W, LOGICAL_H), pygame.SRCALPHA)
+
+        # Fonts & cached text surfaces
         self.font_court: Optional[pygame.font.Font] = None
         self.font_btn: Optional[pygame.font.Font] = None
         self.font_quota: Optional[pygame.font.Font] = None
+
+        self.surf_kick_lbl: Optional[pygame.Surface] = None
+        self.surf_pause_btn: Optional[pygame.Surface] = None
+        self._cached_serves: Optional[int] = None
+        self._cached_quota_surf: Optional[pygame.Surface] = None
 
     def _init_fonts(self) -> None:
         if self.font_court is None:
             self.font_court = pygame.font.Font(None, 24)
             self.font_btn = pygame.font.Font(None, 26)
             self.font_quota = pygame.font.Font(None, 22)
+
+            # Pre-render static court & UI text
+            self.surf_kick_lbl = self.font_court.render("KICK ZONE", True, (90, 98, 120))
+            self.surf_pause_btn = self.font_btn.render("⏸ PAUSE [ESC]", True, COLOR_TEXT_PRIMARY)
 
     def on_enter(self, **kwargs) -> None:
         self._init_fonts()
@@ -414,30 +440,32 @@ class PlayScene(Scene):
 
         # Kicking zone guideline
         pygame.draw.line(surface, (65, 72, 92), (60, int(KICK_TARGET_Y) + oy), (LOGICAL_W - 60, int(KICK_TARGET_Y) + oy), 1)
-        surf_kick_lbl = self.font_court.render("KICK ZONE", True, (90, 98, 120))
-        surface.blit(surf_kick_lbl, (70, int(KICK_TARGET_Y) - 18 + oy))
+        assert self.surf_kick_lbl
+        surface.blit(self.surf_kick_lbl, (70, int(KICK_TARGET_Y) - 18 + oy))
 
-        # 2. World Entities (Offset by screen shake)
-        world_surf = pygame.Surface((LOGICAL_W, LOGICAL_H), pygame.SRCALPHA)
+        # 2. World Entities (Offset by screen shake, using persistent world_surf)
+        self.world_surf.fill((0, 0, 0, 0))
 
-        self.taya.draw(world_surf)
-        self.avatar.draw(world_surf)
-        self.sipa.draw(world_surf)
-        self.hit_system.draw(world_surf, current_time_ms)
+        self.taya.draw(self.world_surf)
+        self.avatar.draw(self.world_surf)
+        self.sipa.draw(self.world_surf)
+        self.hit_system.draw(self.world_surf, current_time_ms)
 
         for ripple in self.ripples:
-            ripple.draw(world_surf)
-        self.particle_emitter.draw(world_surf)
+            ripple.draw(self.world_surf)
+        self.particle_emitter.draw(self.world_surf)
 
-        surface.blit(world_surf, (ox, oy))
+        surface.blit(self.world_surf, (ox, oy))
 
         # 3. Fixed UI Overlay (No Screen Shake for crisp readability)
         self.hud.draw(surface)
 
         # Round Progress / Quota Tracker
-        quota_str = f"TIRA (SERVES): {self.serves_completed}/{self.max_serves}"
-        surf_quota = self.font_quota.render(quota_str, True, COLOR_TEXT_MUTED)
-        surface.blit(surf_quota, (34, 76))
+        if self.serves_completed != self._cached_serves or self._cached_quota_surf is None:
+            self._cached_serves = self.serves_completed
+            quota_str = f"TIRA (SERVES): {self.serves_completed}/{self.max_serves}"
+            self._cached_quota_surf = self.font_quota.render(quota_str, True, COLOR_TEXT_MUTED)
+        surface.blit(self._cached_quota_surf, (34, 76))
 
         # 4. Cursor Crosshair at Logical Mouse Position
         mx, my = int(self.mouse_pos.x), int(self.mouse_pos.y)
@@ -449,6 +477,6 @@ class PlayScene(Scene):
         btn_bg = COLOR_BRICK_RED if not self.is_pause_hovered else (240, 85, 80)
         pygame.draw.rect(surface, btn_bg, self.pause_button_rect, border_radius=8)
         pygame.draw.rect(surface, COLOR_CARD_BORDER, self.pause_button_rect, width=2, border_radius=8)
-        surf_btn = self.font_btn.render("⏸ PAUSE [ESC]", True, COLOR_TEXT_PRIMARY)
-        surface.blit(surf_btn, surf_btn.get_rect(center=self.pause_button_rect.center))
+        assert self.surf_pause_btn
+        surface.blit(self.surf_pause_btn, self.surf_pause_btn.get_rect(center=self.pause_button_rect.center))
 

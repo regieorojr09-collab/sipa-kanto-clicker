@@ -23,6 +23,34 @@ from systems.scoring import ScoreKeeper
 class FloatingJudgment:
     """Animated text pop-up indicating hit accuracy (Swak!, Puwede, Daplis, Bagsak!)."""
 
+    _surface_cache: Dict[Tuple[str, Tuple[int, int, int]], Tuple[pygame.Surface, pygame.Surface]] = {}
+    _composite_alpha_cache: Dict[Tuple[str, Tuple[int, int, int], int], pygame.Surface] = {}
+
+    @classmethod
+    def get_surfaces(cls, text: str, color: Tuple[int, int, int], font: pygame.font.Font) -> Tuple[pygame.Surface, pygame.Surface]:
+        key = (text, color)
+        if key not in cls._surface_cache:
+            text_surf = font.render(text, True, color)
+            shadow_surf = font.render(text, True, (0, 0, 0))
+            cls._surface_cache[key] = (text_surf, shadow_surf)
+        return cls._surface_cache[key]
+
+    @classmethod
+    def get_composite_surface(cls, text: str, color: Tuple[int, int, int], alpha: int, font: pygame.font.Font) -> pygame.Surface:
+        # Quantize alpha into 16 discrete steps to cap total cached surfaces
+        alpha_step = max(0, min(15, alpha // 16))
+        key = (text, color, alpha_step)
+        if key not in cls._composite_alpha_cache:
+            base_text, base_shadow = cls.get_surfaces(text, color, font)
+            w = base_text.get_width() + 4
+            h = base_text.get_height() + 4
+            comp = pygame.Surface((w, h), pygame.SRCALPHA)
+            comp.blit(base_shadow, (2, 2))
+            comp.blit(base_text, (0, 0))
+            comp.set_alpha(int(alpha_step * 17))
+            cls._composite_alpha_cache[key] = comp
+        return cls._composite_alpha_cache[key]
+
     def __init__(self, text: str, pos: Tuple[float, float], color: Tuple[int, int, int]) -> None:
         self.text: str = text
         self.pos: Vector2 = Vector2(pos[0], pos[1])
@@ -44,23 +72,19 @@ class FloatingJudgment:
 
         alpha_factor = max(0.0, 1.0 - (self.elapsed_ms / self.lifetime_ms))
         alpha = int(alpha_factor * 255)
+        if alpha <= 0:
+            return
 
-        # Render text with drop shadow
-        text_surf = font.render(self.text, True, self.color)
-        shadow_surf = font.render(self.text, True, (0, 0, 0))
-
-        text_surf.set_alpha(alpha)
-        shadow_surf.set_alpha(alpha)
-
-        rect = text_surf.get_rect(center=(int(self.pos.x), int(self.pos.y)))
-        surface.blit(shadow_surf, rect.move(2, 2))
-        surface.blit(text_surf, rect)
+        # Retrieve cached composite surface (text + drop shadow baked together)
+        composite_surf = self.get_composite_surface(self.text, self.color, alpha, font)
+        rect = composite_surf.get_rect(center=(int(self.pos.x), int(self.pos.y)))
+        surface.blit(composite_surf, rect)
 
 
 class HUD:
     """
     Renders live gameplay status: Score, Combo count, Accuracy %, Pikon Meter gauge,
-    and floating judgments.
+    and floating judgments with cached surfaces to prevent GC stutter.
     """
 
     def __init__(self, score_keeper: ScoreKeeper, difficulty_controller=None) -> None:
@@ -75,6 +99,29 @@ class HUD:
         self.font_judgment: Optional[pygame.font.Font] = None
         self.font_label: Optional[pygame.font.Font] = None
         self.font_pikon: Optional[pygame.font.Font] = None
+
+        # Pre-rendered & value-cached text surfaces
+        self._cached_score_lbl: Optional[pygame.Surface] = None
+        self._cached_combo_lbl: Optional[pygame.Surface] = None
+
+        self._cached_score_val: Optional[int] = None
+        self._cached_score_surf: Optional[pygame.Surface] = None
+        self._cached_score_shadow: Optional[pygame.Surface] = None
+
+        self._cached_acc_val: Optional[float] = None
+        self._cached_acc_surf: Optional[pygame.Surface] = None
+
+        self._cached_diff_key: Optional[Tuple[str, float]] = None
+        self._cached_diff_surf: Optional[pygame.Surface] = None
+
+        self._cached_pikon_int: Optional[int] = None
+        self._cached_pikon_surf: Optional[pygame.Surface] = None
+
+        self._cached_mods_key: Optional[str] = None
+        self._cached_mods_surf: Optional[pygame.Surface] = None
+
+        self._cached_combo_val: Optional[int] = None
+        self._cached_combo_surf: Optional[pygame.Surface] = None
 
         # Color map for judgments
         self._judgment_colors: Dict[str, Tuple[int, int, int]] = {
@@ -95,6 +142,10 @@ class HUD:
             self.font_label = pygame.font.Font(None, 24)
             self.font_pikon = pygame.font.Font(None, 20)
 
+            # Pre-render static labels once
+            self._cached_score_lbl = self.font_label.render("SCORE", True, COLOR_TEXT_MUTED)
+            self._cached_combo_lbl = self.font_label.render("COMBO", True, COLOR_TEXT_PRIMARY)
+
     def _on_hit_result(
         self,
         judgment: str,
@@ -114,42 +165,47 @@ class HUD:
         self.floating_judgments = [j for j in self.floating_judgments if j.is_alive]
 
     def draw(self, surface: pygame.Surface) -> None:
-        """Renders HUD panels, typography, Pikon Meter, and floating popups."""
+        """Renders HUD panels, typography, Pikon Meter, and floating popups with zero per-frame churn."""
         self._init_fonts()
         assert self.font_score and self.font_combo and self.font_label and self.font_judgment and self.font_pikon
 
         # 1. Top-Right Score Panel
         score_val = self.score_keeper.score
-        score_str = f"{score_val:07d}"
+        if score_val != self._cached_score_val or self._cached_score_surf is None:
+            self._cached_score_val = score_val
+            score_str = f"{score_val:07d}"
+            self._cached_score_shadow = self.font_score.render(score_str, True, (0, 0, 0))
+            self._cached_score_surf = self.font_score.render(score_str, True, COLOR_SUNSHINE)
 
-        surf_shadow = self.font_score.render(score_str, True, (0, 0, 0))
-        surface.blit(surf_shadow, (LOGICAL_W - 228, 26))
+        assert self._cached_score_shadow and self._cached_score_surf and self._cached_score_lbl
+        surface.blit(self._cached_score_shadow, (LOGICAL_W - 228, 26))
+        surface.blit(self._cached_score_surf, (LOGICAL_W - 230, 24))
+        surface.blit(self._cached_score_lbl, (LOGICAL_W - 230, 8))
 
-        surf_score = self.font_score.render(score_str, True, COLOR_SUNSHINE)
-        surface.blit(surf_score, (LOGICAL_W - 230, 24))
-
-        surf_score_lbl = self.font_label.render("SCORE", True, COLOR_TEXT_MUTED)
-        surface.blit(surf_score_lbl, (LOGICAL_W - 230, 8))
-
-        acc_val = self.score_keeper.accuracy
-        acc_str = f"ACCURACY  {acc_val:5.1f}%"
-        surf_acc = self.font_label.render(acc_str, True, COLOR_RETRO_CYAN)
-        surface.blit(surf_acc, (LOGICAL_W - 230, 72))
+        acc_val = round(self.score_keeper.accuracy, 1)
+        if acc_val != self._cached_acc_val or self._cached_acc_surf is None:
+            self._cached_acc_val = acc_val
+            acc_str = f"ACCURACY  {acc_val:5.1f}%"
+            self._cached_acc_surf = self.font_label.render(acc_str, True, COLOR_RETRO_CYAN)
+        surface.blit(self._cached_acc_surf, (LOGICAL_W - 230, 72))
 
         # 2. Top-Center Pikon Meter & Difficulty Display
         if self.difficulty_controller:
             pikon = self.difficulty_controller.pikon_meter
             level_name = self.difficulty_controller.level.display_name
-            mult_str = f"{self.difficulty_controller.level.score_mult:.1f}x"
+            mult = self.difficulty_controller.level.score_mult
 
             bar_w, bar_h = 220, 16
             bar_x = (LOGICAL_W // 2) - (bar_w // 2)
             bar_y = 20
 
             # Difficulty Tag
-            diff_str = f"{level_name.upper()} [{mult_str}]"
-            surf_diff = self.font_pikon.render(diff_str, True, COLOR_TEXT_MUTED)
-            surface.blit(surf_diff, surf_diff.get_rect(center=(LOGICAL_W // 2, bar_y - 10)))
+            diff_key = (level_name, mult)
+            if diff_key != self._cached_diff_key or self._cached_diff_surf is None:
+                self._cached_diff_key = diff_key
+                diff_str = f"{level_name.upper()} [{mult:.1f}x]"
+                self._cached_diff_surf = self.font_pikon.render(diff_str, True, COLOR_TEXT_MUTED)
+            surface.blit(self._cached_diff_surf, self._cached_diff_surf.get_rect(center=(LOGICAL_W // 2, bar_y - 10)))
 
             # Meter Frame
             bg_rect = pygame.Rect(bar_x, bar_y, bar_w, bar_h)
@@ -181,9 +237,12 @@ class HUD:
             pygame.draw.rect(surface, border_col, bg_rect, width=2, border_radius=4)
 
             # Meter Label
-            pikon_lbl = f"PIKON: {int(pikon)}%"
-            surf_pikon_txt = self.font_pikon.render(pikon_lbl, True, COLOR_TEXT_PRIMARY)
-            surface.blit(surf_pikon_txt, surf_pikon_txt.get_rect(center=(LOGICAL_W // 2, bar_y + 24)))
+            pikon_int = int(pikon)
+            if pikon_int != self._cached_pikon_int or self._cached_pikon_surf is None:
+                self._cached_pikon_int = pikon_int
+                pikon_lbl = f"PIKON: {pikon_int}%"
+                self._cached_pikon_surf = self.font_pikon.render(pikon_lbl, True, COLOR_TEXT_PRIMARY)
+            surface.blit(self._cached_pikon_surf, self._cached_pikon_surf.get_rect(center=(LOGICAL_W // 2, bar_y + 24)))
 
             # Active Modifiers Indicators
             mods = []
@@ -196,21 +255,24 @@ class HUD:
 
             if mods:
                 mods_str = "MODS: " + " • ".join(mods)
-                surf_mods = self.font_pikon.render(mods_str, True, COLOR_RETRO_CYAN)
-                surface.blit(surf_mods, surf_mods.get_rect(center=(LOGICAL_W // 2, bar_y + 40)))
+                if mods_str != self._cached_mods_key or self._cached_mods_surf is None:
+                    self._cached_mods_key = mods_str
+                    self._cached_mods_surf = self.font_pikon.render(mods_str, True, COLOR_RETRO_CYAN)
+                surface.blit(self._cached_mods_surf, self._cached_mods_surf.get_rect(center=(LOGICAL_W // 2, bar_y + 40)))
 
-        # 2. Combo Counter (Left-Center)
+        # 3. Combo Counter (Left-Center)
         combo_val = self.score_keeper.current_combo
         if combo_val > 0:
-            combo_str = f"{combo_val}x"
-            # Combo number
-            surf_combo_num = self.font_combo.render(combo_str, True, COLOR_NEON_GREEN)
-            surface.blit(surf_combo_num, (48, 140))
-            # Combo subtitle
-            surf_combo_lbl = self.font_label.render("COMBO", True, COLOR_TEXT_PRIMARY)
-            surface.blit(surf_combo_lbl, (52, 200))
+            if combo_val != self._cached_combo_val or self._cached_combo_surf is None:
+                self._cached_combo_val = combo_val
+                combo_str = f"{combo_val}x"
+                self._cached_combo_surf = self.font_combo.render(combo_str, True, COLOR_NEON_GREEN)
 
-        # 3. Floating Judgments
+            assert self._cached_combo_lbl
+            surface.blit(self._cached_combo_surf, (48, 140))
+            surface.blit(self._cached_combo_lbl, (52, 200))
+
+        # 4. Floating Judgments
         for j in self.floating_judgments:
             j.draw(surface, self.font_judgment)
 
